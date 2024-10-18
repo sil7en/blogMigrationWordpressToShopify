@@ -5,11 +5,7 @@ from gql import gql, Client
 from gql.transport.requests import RequestsHTTPTransport
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-import base64
 import logging
-from requests_toolbelt import MultipartEncoder
-from PIL import Image
-from io import BytesIO
 import time
 
 # Configurar logging
@@ -19,9 +15,9 @@ logging.basicConfig(filename='migration.log', level=logging.DEBUG, format='%(asc
 load_dotenv()
 
 # Variables de entorno
-SHOPIFY_STORE = os.getenv('SHOPIFY_STORE')  # e.g., 'tu-tienda.myshopify.com'
+SHOPIFY_STORE = os.getenv('SHOPIFY_STORE')  # Por ejemplo, 'tu-tienda.myshopify.com'
 SHOPIFY_API_TOKEN = os.getenv('SHOPIFY_API_TOKEN')
-WPGRAPHQL_ENDPOINT = os.getenv('WPGRAPHQL_ENDPOINT')  # e.g., 'https://tu-dominio-wordpress.com/graphql'
+WPGRAPHQL_ENDPOINT = os.getenv('WPGRAPHQL_ENDPOINT')  # Por ejemplo, 'https://tu-dominio-wordpress.com/graphql'
 
 # Verificar que todas las variables estén definidas
 if not all([SHOPIFY_STORE, SHOPIFY_API_TOKEN, WPGRAPHQL_ENDPOINT]):
@@ -54,65 +50,17 @@ def shopify_request(method, url, **kwargs):
         response = requests.request(method, url, headers=shopify_headers, **kwargs)
     return response
 
-def upload_image_to_shopify(image_url):
-    try:
-        logging.debug(f"Descargando imagen: {image_url}")
-        # Descargar imagen
-        image_response = requests.get(image_url)
-        image_response.raise_for_status()
-        image_data = image_response.content
-
-        # Optimizar imagen
-        image = Image.open(BytesIO(image_data))
-        image_format = image.format
-        image_io = BytesIO()
-        image.save(image_io, format=image_format, optimize=True)
-        optimized_image_data = image_io.getvalue()
-
-        # Codificar imagen en base64
-        encoded_image = base64.b64encode(optimized_image_data).decode('utf-8')
-
-        # Obtener nombre de archivo
-        filename = image_url.split('/')[-1]
-
-        # Preparar payload
-        payload = {
-            "file": {
-                "attachment": encoded_image,
-                "filename": filename
-            }
-        }
-
-        # Subir imagen a Shopify
-        response = shopify_request(
-            'POST',
-            f"https://{SHOPIFY_STORE}/admin/api/2023-10/files.json",
-            json=payload
-        )
-        logging.debug(f"Respuesta de la API al subir imagen: {response.status_code} - {response.text}")
-        if response.status_code == 201:
-            file_url = response.json()['file']['url']
-            return file_url
-        else:
-            logging.error(f"Error al subir imagen {filename}: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        logging.error(f"Excepción al subir imagen {image_url}: {str(e)}")
-        return None
-
-def process_images_in_content(content):
-    soup = BeautifulSoup(content, 'html.parser')
-    images = soup.find_all('img')
-    for img in images:
-        src = img.get('src')
-        if src:
-            logging.debug(f"Procesando imagen en contenido: {src}")
-            new_src = upload_image_to_shopify(src)
-            if new_src:
-                img['src'] = new_src
-            else:
-                logging.error(f"No se pudo subir la imagen {src}")
-    return str(soup)
+def get_blog_handle(blog_id):
+    response = shopify_request(
+        'GET',
+        f"https://{SHOPIFY_STORE}/admin/api/2023-10/blogs/{blog_id}.json"
+    )
+    if response.status_code == 200:
+        blog = response.json()['blog']
+        return blog['handle']
+    else:
+        logging.error(f"Error al obtener el handle del blog: {response.status_code} - {response.text}")
+        return None  # Manejar el error adecuadamente
 
 def transform_content(content):
     # Eliminar shortcodes y realizar otras transformaciones
@@ -122,14 +70,7 @@ def transform_content(content):
     for shortcode in soup.find_all('div', class_='shortcode'):
         shortcode.decompose()
 
-    # Actualizar enlaces internos
-    for link in soup.find_all('a', href=True):
-        href = link['href']
-        if 'tu-dominio-wordpress.com' in href:
-            # Reemplazar con la estructura de URLs de Shopify
-            new_href = href.replace('tu-dominio-wordpress.com', SHOPIFY_STORE)
-            link['href'] = new_href
-            logging.debug(f"Enlace actualizado: {href} -> {new_href}")
+    # Nota: Se ha eliminado el código que actualizaba los enlaces internos
 
     return str(soup)
 
@@ -170,12 +111,51 @@ def get_shopify_blog_id():
         logging.error(f"Error al obtener blogs: {response.status_code} - {response.text}")
         return None
 
+def get_existing_shopify_articles(blog_id):
+    existing_slugs = set()
+    page_info = {'has_next_page': True, 'end_cursor': None}
+    limit = 250
+    since_id = None
+
+    while True:
+        params = {'limit': limit}
+        if since_id:
+            params['since_id'] = since_id
+
+        response = shopify_request(
+            'GET',
+            f"https://{SHOPIFY_STORE}/admin/api/2023-10/blogs/{blog_id}/articles.json",
+            params=params
+        )
+        if response.status_code == 200:
+            articles = response.json()['articles']
+            if not articles:
+                break
+            for article in articles:
+                existing_slugs.add(article['handle'])
+            since_id = articles[-1]['id']
+        else:
+            logging.error(f"Error al obtener artículos existentes: {response.status_code} - {response.text}")
+            break
+
+    return existing_slugs
+
 def migrate_posts():
     # Obtener el ID del blog en Shopify
     blog_id = get_shopify_blog_id()
     if not blog_id:
         logging.error("No se puede continuar sin el ID del blog.")
         return
+
+    # Obtener el handle del blog
+    blog_handle = get_blog_handle(blog_id)
+    if not blog_handle:
+        logging.error("No se puede continuar sin el handle del blog.")
+        return
+
+    # Obtener los slugs de artículos existentes en Shopify
+    existing_slugs = get_existing_shopify_articles(blog_id)
+    logging.debug(f"Slugs de artículos existentes: {existing_slugs}")
 
     # Definir la consulta GraphQL para obtener las entradas
     query = gql('''
@@ -191,6 +171,7 @@ def migrate_posts():
                 content
                 date
                 slug
+                excerpt
                 author {
                     node {
                         name
@@ -220,10 +201,10 @@ def migrate_posts():
     has_next_page = True
     after = None
     migrated_posts = 0
-    max_posts = 2  # Cambia este valor para migrar más entradas
+    max_posts = 999999  # Para pruebas iniciales
 
     while has_next_page and migrated_posts < max_posts:
-        variables = {'first': 10, 'after': after}
+        variables = {'first': 1, 'after': after}  # Procesar uno por uno
         try:
             result = wp_client.execute(query, variable_values=variables)
             posts = result['posts']['nodes']
@@ -242,6 +223,12 @@ def migrate_posts():
                 content = post['content']
                 date = post['date']
                 slug = post['slug']
+                excerpt = post.get('excerpt', '')
+                # Generar meta descripción
+                meta_description = BeautifulSoup(excerpt, 'html.parser').get_text().strip()
+                if not meta_description:
+                    content_text = BeautifulSoup(content, 'html.parser').get_text()
+                    meta_description = content_text[:160]
                 author = post['author']['node']['name'] if post['author'] else 'Desconocido'
                 categories = [cat['name'] for cat in post['categories']['nodes']]
                 tags = [tag['name'] for tag in post['tags']['nodes']]
@@ -249,19 +236,15 @@ def migrate_posts():
 
                 logging.debug(f"Procesando entrada: {title}")
 
+                # Verificar si el artículo ya existe
+                if slug in existing_slugs:
+                    logging.info(f"Entrada '{title}' ya existe. Saltando.")
+                    continue
+
                 # Transformar el contenido
                 content = transform_content(content)
 
-                # Procesar imágenes en el contenido
-                content = process_images_in_content(content)
-
-                # Subir imagen destacada
-                if featured_image_url:
-                    new_featured_image_url = upload_image_to_shopify(featured_image_url)
-                else:
-                    new_featured_image_url = None
-
-                # Preparar payload para la entrada
+                # Preparar payload para el artículo
                 article_payload = {
                     "article": {
                         "title": title,
@@ -269,13 +252,15 @@ def migrate_posts():
                         "body_html": content,
                         "published_at": date,
                         "tags": ', '.join(categories + tags),
+                        "summary_html": meta_description,
+                        "handle": slug,  # Usar el slug como handle
                     }
                 }
 
-                # Agregar imagen destacada
-                if new_featured_image_url:
+                # Agregar imagen destacada usando src
+                if featured_image_url:
                     article_payload['article']['image'] = {
-                        "src": new_featured_image_url
+                        "src": featured_image_url
                     }
 
                 logging.debug(f"Payload de la entrada: {article_payload}")
@@ -293,27 +278,14 @@ def migrate_posts():
                     handle = article['handle']
                     logging.info(f"Entrada '{title}' creada exitosamente con ID {article_id}.")
 
-                    # Crear redirección desde la URL antigua a la nueva URL de Shopify
-                    old_url = f"/{slug}/"
-                    new_url = f"/blogs/{article['blog']['handle']}/{handle}"
-                    redirect_payload = {
-                        "redirect": {
-                            "path": old_url,
-                            "target": new_url
-                        }
-                    }
-                    redirect_response = shopify_request(
-                        'POST',
-                        f"https://{SHOPIFY_STORE}/admin/api/2023-10/redirects.json",
-                        json=redirect_payload
-                    )
-                    logging.debug(f"Respuesta de la API al crear redirección: {redirect_response.status_code} - {redirect_response.text}")
-                    if redirect_response.status_code == 201:
-                        logging.info(f"Redirección creada: {old_url} -> {new_url}")
-                    else:
-                        logging.error(f"Error al crear redirección para '{title}': {redirect_response.status_code} - {redirect_response.text}")
+                    # Agregar slug a los existentes para evitar duplicados
+                    existing_slugs.add(slug)
 
                     migrated_posts += 1
+
+                    # Retraso después de procesar cada entrada
+                    time.sleep(5)  # Ajusta el tiempo según tus necesidades
+
                 else:
                     logging.error(f"Error al crear la entrada '{title}': {response.status_code} - {response.text}")
                     continue
