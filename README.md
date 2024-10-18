@@ -4,8 +4,7 @@
 
 ```bash
 python -m venv venv
-cd venv/Scripts/
-source activate
+source venv/Scripts/activate
 ```
 
 ## Install dependencies
