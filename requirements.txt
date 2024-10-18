@@ -1,0 +1,6 @@
+requests
+gql[requests]
+python-dotenv
+beautifulsoup4
+requests_toolbelt
+Pillow
