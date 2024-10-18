@@ -24,6 +24,8 @@ pip install -r requirements.txt
 
 It should contain:
 
+```bash
 SHOPIFY_STORE=your-store.myshopify.com
 SHOPIFY_API_TOKEN=your_shopify_api_token
 WPGRAPHQL_ENDPOINT=https://your-wordpress-site.com/graphql
+```
